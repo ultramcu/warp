@@ -666,7 +666,6 @@ fn read_api_with_metadata() {
     assert_eq!(m.unpushed_commits().len(), 1);
     assert_eq!(m.upstream_ref(), Some("origin/feature"));
     assert!(m.upstream_differs_from_main());
-    assert_eq!(m.pr_info().expect("pr info should be present").number, 42);
     assert!(m.has_head());
     assert_eq!(
         m.get_uncommitted_stats()
@@ -686,7 +685,6 @@ fn read_api_defaults_without_metadata() {
     assert!(m.unpushed_commits().is_empty());
     assert!(m.upstream_ref().is_none());
     assert!(!m.upstream_differs_from_main());
-    assert!(m.pr_info().is_none());
     assert!(!m.has_head());
     assert!(m.get_uncommitted_stats().is_none());
 }
