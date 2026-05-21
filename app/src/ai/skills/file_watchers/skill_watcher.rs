@@ -73,11 +73,23 @@ impl SkillWatcher {
     /// Requires file trees to already be built (i.e. `RepositoryUpdated` has fired).
     /// Returns the parsed skills; the caller is responsible for feeding them into
     /// `SkillManager::handle_skills_added`.
-    pub fn read_skills_for_repos(repo_paths: &[PathBuf], ctx: &AppContext) -> Vec<ParsedSkill> {
+    ///
+    /// Synchronous content hydration is only available for local repositories. Remote
+    /// repository skills are hydrated through `spawn_read_remote_skills`, which has the
+    /// remote client needed for file I/O.
+    pub fn read_skills_for_repos(
+        repo_paths: &[LocalOrRemotePath],
+        ctx: &AppContext,
+    ) -> Vec<ParsedSkill> {
         let repo_metadata = RepoMetadataModel::as_ref(ctx);
         let skill_dirs: Vec<PathBuf> = repo_paths
             .iter()
-            .filter_map(|repo_path| repo_metadata::RepositoryIdentifier::try_local(repo_path))
+            .filter_map(|repo_path| match repo_path {
+                LocalOrRemotePath::Local(repo_path) => {
+                    repo_metadata::RepositoryIdentifier::try_local(repo_path)
+                }
+                LocalOrRemotePath::Remote(_) => None,
+            })
             .flat_map(|repo_id| find_skill_directories_in_tree(&repo_id, repo_metadata, ctx))
             .filter_map(|path| path.to_local_path().map(Path::to_path_buf))
             .collect();

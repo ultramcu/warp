@@ -360,7 +360,7 @@ impl SkillManager {
         match reference {
             SkillReference::Path(path) => self
                 .skill_by_path(path)
-                .or_else(|| self.unique_skill_by_display_path(path)),
+                .or_else(|| self.unique_skill_by_display_path(&path.display_path())),
             SkillReference::BundledSkillId(id) => self.active_bundled_skill(id, ctx),
         }
     }
@@ -371,11 +371,13 @@ impl SkillManager {
         bundled.activation.is_enabled(ctx).then_some(&bundled.skill)
     }
 
-    fn unique_skill_by_display_path(
+    /// Returns a cached skill whose display path is uniquely represented in the cache.
+    ///
+    /// This is for UI/display-originated paths where local vs remote provenance is not available.
+    pub fn unique_skill_by_display_path(
         &self,
-        reference_path: &LocalOrRemotePath,
+        reference_display_path: &str,
     ) -> Option<&ParsedSkill> {
-        let reference_display_path = reference_path.display_path();
         let mut matches = self
             .skills_by_path
             .iter()

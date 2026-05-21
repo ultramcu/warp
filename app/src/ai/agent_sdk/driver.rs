@@ -28,6 +28,7 @@ use warp_core::features::FeatureFlag;
 use warp_core::{report_error, report_if_error, safe_debug, safe_error, safe_info};
 use warp_graphql::ai::AgentTaskState;
 use warp_managed_secrets::ManagedSecretValue;
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::r#async::{FutureExt, TimeoutError};
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, ModelSpawner, SingletonEntity};
 
@@ -1504,6 +1505,10 @@ impl AgentDriver {
 
         let load_skills_result = foreground
             .spawn(move |_, ctx| {
+                let repo_paths = repo_paths
+                    .into_iter()
+                    .map(LocalOrRemotePath::Local)
+                    .collect::<Vec<_>>();
                 let skills = SkillWatcher::read_skills_for_repos(&repo_paths, ctx);
                 if !skills.is_empty() {
                     log::info!("Loaded {} environment skill(s)", skills.len());

@@ -18,6 +18,28 @@ use warpui::AppContext;
 
 use crate::warp_managed_paths_watcher::warp_managed_skill_dirs;
 
+fn local_or_remote_path_for_repo_path(
+    repo_id: &RepositoryIdentifier,
+    path: &StandardizedPath,
+) -> LocalOrRemotePath {
+    match repo_id {
+        RepositoryIdentifier::Local(_) => LocalOrRemotePath::Local(path.to_local_path_lossy()),
+        RepositoryIdentifier::Remote(remote) => {
+            LocalOrRemotePath::Remote(RemotePath::new(remote.host_id.clone(), path.clone()))
+        }
+    }
+}
+
+fn local_or_remote_path_for_repo_content(
+    repo_id: &RepositoryIdentifier,
+    content: RepoContent<'_>,
+) -> LocalOrRemotePath {
+    match content {
+        RepoContent::Directory(dir) => local_or_remote_path_for_repo_path(repo_id, &dir.path),
+        RepoContent::File(file) => local_or_remote_path_for_repo_path(repo_id, &file.path),
+    }
+}
+
 /// Finds all skill directories in a repository by querying the RepoMetadataModel tree.
 ///
 /// Returns a list of paths to skill directories (e.g., `/repo/.agents/skills/`, `/repo/sub/.claude/skills/`).
@@ -49,26 +71,7 @@ pub fn find_skill_directories_in_tree(
         .into_iter()
         // Only directories should reach this iterator due to the GetContentsArgs::filter.
         // Keep the File arm for exhaustive matching in case RepoContent grows new variants.
-        .map(|content| match content {
-            RepoContent::Directory(dir) => match repo_id {
-                RepositoryIdentifier::Local(_) => {
-                    LocalOrRemotePath::Local(dir.path.to_local_path_lossy())
-                }
-                RepositoryIdentifier::Remote(remote) => LocalOrRemotePath::Remote(RemotePath::new(
-                    remote.host_id.clone(),
-                    dir.path.as_ref().clone(),
-                )),
-            },
-            RepoContent::File(f) => match repo_id {
-                RepositoryIdentifier::Local(_) => {
-                    LocalOrRemotePath::Local(f.path.to_local_path_lossy())
-                }
-                RepositoryIdentifier::Remote(remote) => LocalOrRemotePath::Remote(RemotePath::new(
-                    remote.host_id.clone(),
-                    f.path.as_ref().clone(),
-                )),
-            },
-        })
+        .map(|content| local_or_remote_path_for_repo_content(repo_id, content))
         .collect()
 }
 
@@ -86,15 +89,7 @@ pub fn find_skill_files_in_tree(
         let RepoContent::File(file) = content else {
             return false;
         };
-        let path = match &repo_id_for_filter {
-            RepositoryIdentifier::Local(_) => {
-                LocalOrRemotePath::Local(file.path.to_local_path_lossy())
-            }
-            RepositoryIdentifier::Remote(remote) => LocalOrRemotePath::Remote(RemotePath::new(
-                remote.host_id.clone(),
-                file.path.as_ref().clone(),
-            )),
-        };
+        let path = local_or_remote_path_for_repo_path(&repo_id_for_filter, &file.path);
         extract_skill_parent_directory(&path).is_ok()
     });
 
@@ -106,15 +101,7 @@ pub fn find_skill_files_in_tree(
             let RepoContent::File(file) = content else {
                 return None;
             };
-            Some(match repo_id {
-                RepositoryIdentifier::Local(_) => {
-                    LocalOrRemotePath::Local(file.path.to_local_path_lossy())
-                }
-                RepositoryIdentifier::Remote(remote) => LocalOrRemotePath::Remote(RemotePath::new(
-                    remote.host_id.clone(),
-                    file.path.as_ref().clone(),
-                )),
-            })
+            Some(local_or_remote_path_for_repo_path(repo_id, &file.path))
         })
         .collect()
 }

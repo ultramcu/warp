@@ -25,7 +25,6 @@ use warp_core::HostId;
 use warp_editor::content::buffer::InitialBufferState;
 use warp_editor::render::element::VerticalExpansionBehavior;
 use warp_util::file::FileSaveError;
-use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warp_util::path::common_path;
 use warp_util::standardized_path::StandardizedPath;
 use warpui::elements::new_scrollable::{ScrollableAppearance, SingleAxisConfig};
@@ -1588,7 +1587,8 @@ impl CodeDiffView {
         let skill = common_path(&file_paths)
             .and_then(|common| skill_path_from_file_path(&common))
             .and_then(|skill_path| {
-                SkillManager::as_ref(app).skill_by_path(&LocalOrRemotePath::Local(skill_path))
+                SkillManager::as_ref(app)
+                    .unique_skill_by_display_path(skill_path.to_string_lossy().as_ref())
             });
         if let Some(skill) = skill {
             let skill_path = skill.path.clone();

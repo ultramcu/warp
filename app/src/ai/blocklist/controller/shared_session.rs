@@ -3,6 +3,7 @@
 // and defines state used only for session sharing.
 use std::collections::HashMap;
 
+use ai::skills::SkillPathOrigin;
 use itertools::Itertools;
 use session_sharing_protocol::common::{AgentAttachment, ParticipantId, ServerConversationToken};
 use warp_core::features::FeatureFlag;
@@ -319,6 +320,7 @@ impl BlocklistAIController {
                 actions.actions,
                 conversation_id,
                 self.terminal_view_id,
+                &SkillPathOrigin::Unavailable,
                 ctx,
             ) {
                 log::error!(

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use ai::skills::SkillPathOrigin;
 use chrono::Local;
 use prost_types::FieldMask;
 use warp_multi_agent_api as api;
@@ -115,6 +116,7 @@ fn test_upsert_message_adds_start_agent_prompt_to_output() {
         exchange_id,
         None,
         None,
+        &SkillPathOrigin::Local,
         FieldMask {
             paths: vec!["message.tool_call".to_string()],
         },
@@ -383,7 +385,13 @@ fn test_restored_optimistic_root_can_upgrade_to_server_created_task() {
         Task::new_restored_optimistic_root("optimistic-root".to_string(), std::iter::empty());
 
     let task = task
-        .into_server_created_task(create_api_task("server-root", vec![]), None, None, None)
+        .into_server_created_task(
+            create_api_task("server-root", vec![]),
+            None,
+            None,
+            None,
+            &SkillPathOrigin::Unavailable,
+        )
         .expect("restored optimistic root should upgrade");
 
     assert_eq!(task.id().to_string(), "server-root");
