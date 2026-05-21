@@ -17,6 +17,7 @@ use super::agent_view::{AgentViewController, AgentViewEntryOrigin, EnterAgentVie
 use ai::project_context::model::ProjectContextModel;
 use parking_lot::FairMutex;
 use warp_core::features::FeatureFlag;
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::{AppContext, Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
 use crate::ai::agent::conversation::{AIConversationAutoexecuteMode, ConversationStatus};
@@ -417,6 +418,25 @@ impl BlocklistAIContextModel {
     /// If `is_user_query` is true, includes blocks, selected text, and images as context.
     /// If false, excludes these user-specific contexts but includes everything else.
     pub fn pending_context(&self, app: &AppContext, is_user_query: bool) -> Vec<AIAgentContext> {
+        let current_working_directory_location = self.current_pwd().and_then(|path| {
+            PathBuf::from_str(&path)
+                .ok()
+                .and_then(|path| path.canonicalize().ok())
+                .map(LocalOrRemotePath::Local)
+        });
+        self.pending_context_for_location(
+            app,
+            is_user_query,
+            current_working_directory_location.as_ref(),
+        )
+    }
+
+    pub fn pending_context_for_location(
+        &self,
+        app: &AppContext,
+        is_user_query: bool,
+        current_working_directory_location: Option<&LocalOrRemotePath>,
+    ) -> Vec<AIAgentContext> {
         let pwd = self.current_pwd();
         let is_pwd_indexed = if cfg!(feature = "agent_mode_evals") {
             // In evals, we want to disable file outline based search. Full
@@ -429,15 +449,9 @@ impl BlocklistAIContextModel {
                 })
         };
 
-        let project_rules = if let Some(pwd) = pwd.clone().and_then(|path| {
-            PathBuf::from_str(&path)
-                .ok()
-                .and_then(|s| s.canonicalize().ok())
-        }) {
-            ProjectContextModel::as_ref(app).find_applicable_rules(&pwd)
-        } else {
-            None
-        };
+        let project_rules = current_working_directory_location.and_then(|pwd| {
+            ProjectContextModel::as_ref(app).find_applicable_rules_at_location(pwd)
+        });
 
         let mut context = Vec::new();
 
@@ -466,14 +480,14 @@ impl BlocklistAIContextModel {
         // Always include project rules if available
         if let Some(rules) = project_rules {
             context.push(AIAgentContext::ProjectRules {
-                root_path: rules.root_path.to_string_lossy().into(),
+                root_path: rules.root_path.display_path(),
                 active_rules: rules
                     .active_rules
                     .into_iter()
                     .map(|rule| {
                         let line_count = rule.content.lines().count();
                         FileContext {
-                            file_name: rule.path.to_string_lossy().into(),
+                            file_name: rule.path.display_path(),
                             content: AnyFileContent::StringContent(rule.content.clone()),
                             line_range: None,
                             last_modified: None,

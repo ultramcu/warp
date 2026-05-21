@@ -5,6 +5,7 @@ use std::collections::HashMap;
 #[cfg(feature = "local_fs")]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::{Entity, ModelContext, SingletonEntity};
 
 use super::GlobalRules;
@@ -23,15 +24,15 @@ cfg_if::cfg_if! {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ProjectRule {
-    pub path: PathBuf,
+    pub path: LocalOrRemotePath,
     pub content: String,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 struct RuleAtPath {
-    parent_path: PathBuf,
+    parent_path: LocalOrRemotePath,
     warp_md: Option<ProjectRule>,
     agents_md: Option<ProjectRule>,
 }
@@ -42,9 +43,9 @@ impl RuleAtPath {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ProjectRulesResult {
-    pub root_path: PathBuf,
+    pub root_path: LocalOrRemotePath,
     pub active_rules: Vec<ProjectRule>,
     pub additional_rule_paths: Vec<String>,
 }
@@ -80,7 +81,7 @@ struct ProjectRules {
 
 impl ProjectRules {
     /// Finds the set of rules that are active in the given path and the set that are available to be applied.
-    fn find_active_or_applicable_rules(&self, path: &Path) -> FindRulesResult {
+    fn find_active_or_applicable_rules(&self, path: &LocalOrRemotePath) -> FindRulesResult {
         let mut active_rules = Vec::new();
         let mut available_rule_paths = Vec::new();
 
@@ -91,7 +92,7 @@ impl ProjectRules {
                 if path.starts_with(&rule.parent_path) {
                     active_rules.push(respected_rule.clone());
                 } else {
-                    available_rule_paths.push(respected_rule.path.to_string_lossy().to_string());
+                    available_rule_paths.push(respected_rule.path.display_path());
                 }
             }
         }
@@ -104,9 +105,9 @@ impl ProjectRules {
 
     /// Remove a rule from the set of project rules. This returns the removed rule.
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
-    fn remove_rule(&mut self, path: &Path) -> Option<ProjectRule> {
+    fn remove_rule(&mut self, path: &LocalOrRemotePath) -> Option<ProjectRule> {
         let parent = path.parent()?;
-        let file_name = path.file_name().and_then(|name| name.to_str())?;
+        let file_name = path.file_name()?;
 
         let rule = self
             .rules
@@ -125,11 +126,11 @@ impl ProjectRules {
     /// Upsert a rule to the set of project rules. This will create a new RuleAtPath entry if none exists and update the existing one
     /// otherwise.
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
-    fn upsert_rule(&mut self, path: &Path, content: String) {
+    fn upsert_rule(&mut self, path: &LocalOrRemotePath, content: String) {
         let Some(parent) = path.parent() else {
             return;
         };
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        let Some(file_name) = path.file_name() else {
             return;
         };
 
@@ -139,7 +140,7 @@ impl ProjectRules {
             .find(|rule| rule.parent_path == parent);
 
         let rule_file = Some(ProjectRule {
-            path: path.to_path_buf(),
+            path: path.clone(),
             content,
         });
 
@@ -153,8 +154,9 @@ impl ProjectRules {
             }
             None => {
                 let mut rule = RuleAtPath {
-                    parent_path: parent.to_path_buf(),
-                    ..Default::default()
+                    parent_path: parent,
+                    warp_md: None,
+                    agents_md: None,
                 };
                 if file_name.to_lowercase() == "warp.md" {
                     rule.warp_md = rule_file;
@@ -173,7 +175,7 @@ impl ProjectRules {
 #[derive(Debug, Default)]
 pub struct ProjectContextModel {
     /// Mapping from directory path to list of rule files found in that directory
-    path_to_rules: HashMap<PathBuf, ProjectRules>,
+    path_to_rules: HashMap<LocalOrRemotePath, ProjectRules>,
     /// Queued repository updates for paths that have an in-flight processing task.
     /// The presence of a key indicates an active async task for that path;
     /// the Vec holds updates that arrived while that task was running.
@@ -250,7 +252,7 @@ impl ProjectContextModel {
         ctx.spawn(
             async move { Self::read_persisted_rules(persisted_rules).await },
             |me, mut res, ctx| {
-                for root in res.keys() {
+                for root in res.keys().filter_map(LocalOrRemotePath::to_local_path) {
                     me.try_initialize_and_register_watcher(root, ctx);
                 }
 
@@ -289,15 +291,19 @@ impl ProjectContextModel {
                                 .rules
                                 .iter()
                                 .filter_map(|rule| {
-                                    rule.warp_md.as_ref().map(|rule| ProjectRulePath {
-                                        project_root: root_clone.clone(),
-                                        path: rule.path.clone(),
+                                    rule.warp_md.as_ref().and_then(|rule| {
+                                        rule.path.to_local_path().map(|path| ProjectRulePath {
+                                            project_root: root_clone.clone(),
+                                            path: path.to_path_buf(),
+                                        })
                                     })
                                 })
                                 .chain(rule_files.rules.iter().filter_map(|rule| {
-                                    rule.agents_md.as_ref().map(|rule| ProjectRulePath {
-                                        project_root: root_clone.clone(),
-                                        path: rule.path.clone(),
+                                    rule.agents_md.as_ref().and_then(|rule| {
+                                        rule.path.to_local_path().map(|path| ProjectRulePath {
+                                            project_root: root_clone.clone(),
+                                            path: path.to_path_buf(),
+                                        })
                                     })
                                 }))
                                 .collect(),
@@ -305,7 +311,8 @@ impl ProjectContextModel {
                         };
                         ctx.emit(ProjectContextModelEvent::KnownRulesChanged(delta));
 
-                        me.path_to_rules.insert(root_clone, rule_files);
+                        me.path_to_rules
+                            .insert(LocalOrRemotePath::Local(root_clone), rule_files);
                         ctx.emit(ProjectContextModelEvent::PathIndexed);
                     }
                     Err(e) => log::warn!(
@@ -409,7 +416,8 @@ impl ProjectContextModel {
                     return;
                 }
 
-                let Some(rules) = me.path_to_rules.get(&path_clone).cloned() else {
+                let path_location = LocalOrRemotePath::Local(path_clone.clone());
+                let Some(rules) = me.path_to_rules.get(&path_location).cloned() else {
                     return;
                 };
 
@@ -440,7 +448,8 @@ impl ProjectContextModel {
         ctx: &mut ModelContext<Self>,
     ) {
         ctx.emit(ProjectContextModelEvent::KnownRulesChanged(rule_delta));
-        self.path_to_rules.insert(path.to_path_buf(), rules);
+        self.path_to_rules
+            .insert(LocalOrRemotePath::Local(path.to_path_buf()), rules);
         self.drain_pending_updates(path, ctx);
         ctx.emit(ProjectContextModelEvent::PathIndexed);
     }
@@ -460,7 +469,8 @@ impl ProjectContextModel {
         }
 
         let updates = std::mem::take(queued);
-        let Some(rules) = self.path_to_rules.get(&path_buf).cloned() else {
+        let path_location = LocalOrRemotePath::Local(path_buf.clone());
+        let Some(rules) = self.path_to_rules.get(&path_location).cloned() else {
             self.pending_updates.remove(&path_buf);
             return;
         };
@@ -502,7 +512,16 @@ impl ProjectContextModel {
     /// Use this for callers that need a project-initialization signal rather
     /// than the full rule context sent to agents.
     pub fn find_applicable_project_rules(&self, path: &Path) -> Option<ProjectRulesResult> {
-        let mut current_path = path.to_owned();
+        self.find_applicable_project_rules_at_location(&LocalOrRemotePath::Local(
+            path.to_path_buf(),
+        ))
+    }
+
+    pub fn find_applicable_project_rules_at_location(
+        &self,
+        path: &LocalOrRemotePath,
+    ) -> Option<ProjectRulesResult> {
+        let mut current_path = path.clone();
 
         // Walk upwards from `path` toward the filesystem root, stopping at the
         // first directory we have indexed project rules for. `path_to_rules`
@@ -522,9 +541,10 @@ impl ProjectContextModel {
                 });
             }
 
-            if !current_path.pop() {
+            let Some(parent) = current_path.parent() else {
                 return None;
-            }
+            };
+            current_path = parent;
         }
     }
 
@@ -541,7 +561,14 @@ impl ProjectContextModel {
     /// a project-only signal should use
     /// [`Self::find_applicable_project_rules`] instead.
     pub fn find_applicable_rules(&self, path: &Path) -> Option<ProjectRulesResult> {
-        let project_result = self.find_applicable_project_rules(path);
+        self.find_applicable_rules_at_location(&LocalOrRemotePath::Local(path.to_path_buf()))
+    }
+
+    pub fn find_applicable_rules_at_location(
+        &self,
+        path: &LocalOrRemotePath,
+    ) -> Option<ProjectRulesResult> {
+        let project_result = self.find_applicable_project_rules_at_location(path);
 
         // Layered precedence: global rules are always included alongside
         // project rules. `global_rules` is a `BTreeMap`, so iteration is
@@ -562,8 +589,9 @@ impl ProjectContextModel {
 
         // Use the indexed project root when available; otherwise fall back to
         // the parent of the first global rule (or empty).
-        let root_path = project_root
-            .unwrap_or_else(|| self.global_rules.first_rule_parent().unwrap_or_default());
+        let root_path = project_root.unwrap_or_else(|| {
+            LocalOrRemotePath::Local(self.global_rules.first_rule_parent().unwrap_or_default())
+        });
 
         Some(ProjectRulesResult {
             root_path,
@@ -589,7 +617,7 @@ impl ProjectContextModel {
             {
                 if matches_rules_pattern(file_name_str) {
                     // Remove the rule from existing rules
-                    existing_rules.remove_rule(&target_file.path);
+                    existing_rules.remove_rule(&LocalOrRemotePath::Local(target_file.path.clone()));
                     rules_delta.deleted_rules.push(target_file.path.clone());
 
                     log::debug!("Removed rule file: {}", target_file.path.display());
@@ -606,11 +634,16 @@ impl ProjectContextModel {
             if let Some(file_name_str) = to_target.path.file_name().and_then(|name| name.to_str()) {
                 if matches_rules_pattern(file_name_str) {
                     // Find and update the rule with the old path
-                    if let Some(rule) = existing_rules.remove_rule(&from_target.path) {
+                    if let Some(rule) = existing_rules
+                        .remove_rule(&LocalOrRemotePath::Local(from_target.path.clone()))
+                    {
                         // Emit deletion event for old path
                         rules_delta.deleted_rules.push(from_target.path.clone());
 
-                        existing_rules.upsert_rule(&to_target.path, rule.content);
+                        existing_rules.upsert_rule(
+                            &LocalOrRemotePath::Local(to_target.path.clone()),
+                            rule.content,
+                        );
 
                         // Emit upsert event for new path
                         rules_delta.discovered_rules.push(ProjectRulePath {
@@ -640,7 +673,10 @@ impl ProjectContextModel {
                     // Read the content of the rule file
                     match async_fs::read_to_string(&target_file.path).await {
                         Ok(content) => {
-                            existing_rules.upsert_rule(&target_file.path, content);
+                            existing_rules.upsert_rule(
+                                &LocalOrRemotePath::Local(target_file.path.clone()),
+                                content,
+                            );
                             rules_delta.discovered_rules.push(ProjectRulePath {
                                 path: target_file.path.clone(),
                                 project_root: project_root.clone(),
@@ -712,7 +748,7 @@ impl ProjectContextModel {
                         }
                     };
 
-                    rule_files.upsert_rule(&local_path, content);
+                    rule_files.upsert_rule(&LocalOrRemotePath::Local(local_path), content);
                 }
             }
         }
@@ -723,14 +759,16 @@ impl ProjectContextModel {
     #[cfg(feature = "local_fs")]
     async fn read_persisted_rules(
         rule_paths: Vec<ProjectRulePath>,
-    ) -> HashMap<PathBuf, ProjectRules> {
-        let mut rules: HashMap<PathBuf, ProjectRules> = HashMap::new();
+    ) -> HashMap<LocalOrRemotePath, ProjectRules> {
+        let mut rules: HashMap<LocalOrRemotePath, ProjectRules> = HashMap::new();
 
         for rule in rule_paths {
             match async_fs::read_to_string(&rule.path).await {
                 Ok(content) => {
-                    let existing_rules = rules.entry(rule.project_root).or_default();
-                    existing_rules.upsert_rule(&rule.path, content);
+                    let existing_rules = rules
+                        .entry(LocalOrRemotePath::Local(rule.project_root))
+                        .or_default();
+                    existing_rules.upsert_rule(&LocalOrRemotePath::Local(rule.path), content);
                 }
                 Err(e) => {
                     log::debug!(
@@ -746,7 +784,7 @@ impl ProjectContextModel {
         rules
     }
 
-    pub fn indexed_rules(&self) -> impl Iterator<Item = PathBuf> + '_ {
+    pub fn indexed_rules(&self) -> impl Iterator<Item = LocalOrRemotePath> + '_ {
         self.path_to_rules.values().flat_map(|rules| {
             rules.rules.iter().filter_map(|rules| {
                 rules
@@ -765,15 +803,30 @@ impl ProjectContextModel {
     /// Returns the rule file paths associated with a specific workspace root path.
     pub fn rules_for_workspace(&self, workspace_path: &Path) -> Vec<PathBuf> {
         self.path_to_rules
-            .get(workspace_path)
+            .get(&LocalOrRemotePath::Local(workspace_path.to_path_buf()))
             .into_iter()
             .flat_map(|rules| {
                 rules.rules.iter().filter_map(|rule| {
-                    rule.respected_rule()
-                        .map(|project_rule| project_rule.path.clone())
+                    rule.respected_rule().and_then(|project_rule| {
+                        project_rule.path.to_local_path().map(Path::to_path_buf)
+                    })
                 })
             })
             .collect()
+    }
+
+    pub fn replace_rules_for_remote_root(
+        &mut self,
+        root_path: LocalOrRemotePath,
+        rules: Vec<ProjectRule>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let mut project_rules = ProjectRules::default();
+        for rule in rules {
+            project_rules.upsert_rule(&rule.path, rule.content);
+        }
+        self.path_to_rules.insert(root_path, project_rules);
+        ctx.emit(ProjectContextModelEvent::PathIndexed);
     }
 }
 
