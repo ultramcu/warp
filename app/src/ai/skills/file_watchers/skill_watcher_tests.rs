@@ -14,8 +14,8 @@ use warp_util::{
 };
 use warpui::App;
 
-use crate::ai::skills::skill_manager::SkillWatcherEvent;
 use super::{parse_remote_skill_file_contexts, SkillWatcher};
+use crate::ai::skills::skill_manager::SkillWatcherEvent;
 
 /// Helper function for creating a single skill file
 fn create_skill_file(dir: &TempDir, name: &str, description: &str, content: &str) -> ParsedSkill {

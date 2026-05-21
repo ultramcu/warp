@@ -1,5 +1,3 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use ai::skills::{
     get_provider_for_path, home_skills_path, parse_skill, parse_skill_content_at_location,
     ParsedSkill, SkillProvider, SkillScope, SKILL_PROVIDER_DEFINITIONS,
@@ -14,6 +12,8 @@ use repo_metadata::{
     repository::{Repository, SubscriberId},
     DirectoryWatcher, RepoMetadataModel, RepositoryUpdate,
 };
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
 use watcher::{BulkFilesystemWatcherEvent, HomeDirectoryWatcher, HomeDirectoryWatcherEvent};

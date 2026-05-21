@@ -3,9 +3,7 @@ mod file_watchers;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use ai::skills::{
-    parse_bundled_skill, provider_rank, ParsedSkill, SkillProvider, SkillReference,
-};
+use ai::skills::{parse_bundled_skill, provider_rank, ParsedSkill, SkillProvider, SkillReference};
 pub use file_watchers::{
     extract_skill_parent_directory, read_skills_from_directories, SkillWatcher, SkillWatcherEvent,
 };
