@@ -30,6 +30,7 @@ use warp_editor::{
     content::buffer::InitialBufferState, render::element::VerticalExpansionBehavior,
 };
 use warp_util::file::FileSaveError;
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warp_util::path::common_path;
 use warp_util::standardized_path::StandardizedPath;
 use warpui::{
@@ -270,7 +271,7 @@ pub enum CodeDiffViewEvent {
     /// Emitted when the user opens a skill file from a code diff
     OpenSkill {
         reference: SkillReference,
-        path: PathBuf,
+        path: LocalOrRemotePath,
     },
     /// Emitted when the user opens an MCP config file from a code diff
     OpenMCPConfig {
@@ -445,7 +446,7 @@ pub enum CodeDiffViewAction {
     RevertChanges,
     OpenSkill {
         reference: SkillReference,
-        path: PathBuf,
+        path: LocalOrRemotePath,
         mouse_state: MouseStateHandle,
     },
     OpenMCPConfig {
@@ -1608,7 +1609,9 @@ impl CodeDiffView {
         // Renders the 'open skill' button if all edited files live in the same skill directory
         let skill = common_path(&file_paths)
             .and_then(|common| skill_path_from_file_path(&common))
-            .and_then(|skill_path| SkillManager::as_ref(app).skill_by_path(&skill_path));
+            .and_then(|skill_path| {
+                SkillManager::as_ref(app).skill_by_path(&LocalOrRemotePath::Local(skill_path))
+            });
         if let Some(skill) = skill {
             let skill_path = skill.path.clone();
             let skill_reference = SkillManager::handle(app)

@@ -8,8 +8,8 @@ use super::{
         HomeSkillSubscriber, ProjectSkillSubscriber, SkillRepositoryMessage, SymlinkSkillSubscriber,
     },
     utils::{
-        find_skill_directories_in_tree, is_home_provider_path, is_home_skill_directory,
-        is_skill_file, read_skills_from_directories,
+        find_skill_directories_in_tree, find_skill_files_in_tree, is_home_provider_path,
+        is_home_skill_directory, is_skill_file, read_skills_from_directories,
     },
 };
 use watcher::{BulkFilesystemWatcherEvent, HomeDirectoryWatcher, HomeDirectoryWatcherEvent};
@@ -20,15 +20,18 @@ use crate::warp_managed_paths_watcher::{
     WarpManagedPathsWatcherEvent,
 };
 use ai::skills::{
-    home_skills_path, parse_skill, ParsedSkill, SkillProvider, SKILL_PROVIDER_DEFINITIONS,
+    get_provider_for_path, home_skills_path, parse_skill, parse_skill_content_at_location,
+    ParsedSkill, SkillProvider, SkillScope, SKILL_PROVIDER_DEFINITIONS,
 };
 use async_channel::Sender;
 use chrono::{DateTime, Duration, Utc};
+use remote_server::proto::{file_context_proto, ReadFileContextFile, ReadFileContextRequest};
 use repo_metadata::{
     repositories::DetectedRepositories,
     repository::{Repository, SubscriberId},
     DirectoryWatcher, RepoMetadataModel, RepositoryUpdate,
 };
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
 
 #[derive(Debug, PartialEq)]
@@ -77,7 +80,9 @@ impl SkillWatcher {
         let repo_metadata = RepoMetadataModel::as_ref(ctx);
         let skill_dirs: Vec<PathBuf> = repo_paths
             .iter()
-            .flat_map(|repo_path| find_skill_directories_in_tree(repo_path, repo_metadata, ctx))
+            .filter_map(|repo_path| repo_metadata::RepositoryIdentifier::try_local(repo_path))
+            .flat_map(|repo_id| find_skill_directories_in_tree(&repo_id, repo_metadata, ctx))
+            .filter_map(|path| path.to_local_path().map(Path::to_path_buf))
             .collect();
 
         read_skills_from_directories(skill_dirs)
@@ -176,11 +181,15 @@ impl SkillWatcher {
                         me.scan_repository_for_skills(&local_path, ctx);
                     }
                 }
+                RepoMetadataEvent::RepositoryUpdated {
+                    id: remote_id @ RepositoryIdentifier::Remote(_),
+                } => {
+                    me.scan_remote_repository_for_skills(remote_id, ctx);
+                }
                 RepoMetadataEvent::FileTreeEntryUpdated { .. } => {
                     me.handle_queued_project_directory_creations(ctx);
                 }
-                RepoMetadataEvent::RepositoryUpdated { .. }
-                | RepoMetadataEvent::RepositoryRemoved { .. }
+                RepoMetadataEvent::RepositoryRemoved { .. }
                 | RepoMetadataEvent::FileTreeUpdated { .. }
                 | RepoMetadataEvent::UpdatingRepositoryFailed { .. }
                 | RepoMetadataEvent::IncrementalUpdateReady { .. } => {}
@@ -234,11 +243,32 @@ impl SkillWatcher {
         let repo_metadata = RepoMetadataModel::as_ref(ctx);
 
         // Find all skill directories in the tree
-        let skill_dirs = find_skill_directories_in_tree(repo_path, repo_metadata, ctx);
+        let Some(repo_id) = repo_metadata::RepositoryIdentifier::try_local(repo_path) else {
+            return;
+        };
+        let skill_dirs = find_skill_directories_in_tree(&repo_id, repo_metadata, ctx)
+            .into_iter()
+            .filter_map(|path| path.to_local_path().map(Path::to_path_buf))
+            .collect::<Vec<_>>();
         if skill_dirs.is_empty() {
             return;
         }
         Self::spawn_read_skills_from_directories(skill_dirs, ctx);
+    }
+
+    /// Scans remote repo metadata for project skill files, then hydrates the
+    /// matching file contents from the connected remote daemon.
+    fn scan_remote_repository_for_skills(
+        &mut self,
+        repo_id: &repo_metadata::RepositoryIdentifier,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let repo_metadata = RepoMetadataModel::as_ref(ctx);
+        let skill_paths = find_skill_files_in_tree(repo_id, repo_metadata, ctx);
+        if skill_paths.is_empty() {
+            return;
+        }
+        Self::spawn_read_remote_skills(skill_paths, ctx);
     }
 
     fn spawn_read_skills_from_directories(
@@ -259,6 +289,75 @@ impl SkillWatcher {
                         .watcher_event_tx
                         .try_send(SkillWatcherEvent::SkillsAdded { skills });
                 }
+            },
+        );
+    }
+
+    fn spawn_read_remote_skills(skill_paths: Vec<LocalOrRemotePath>, ctx: &mut ModelContext<Self>) {
+        let Some(host_id) = skill_paths.iter().find_map(|path| match path {
+            LocalOrRemotePath::Remote(remote) => Some(remote.host_id.clone()),
+            LocalOrRemotePath::Local(_) => None,
+        }) else {
+            return;
+        };
+        let Some(client) = crate::remote_server::manager::RemoteServerManager::as_ref(ctx)
+            .client_for_host(&host_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        ctx.spawn(
+            async move {
+                let request = ReadFileContextRequest {
+                    files: skill_paths
+                        .iter()
+                        .filter_map(|path| match path {
+                            LocalOrRemotePath::Remote(remote) => Some(ReadFileContextFile {
+                                path: remote.path.as_str().to_string(),
+                                line_ranges: Vec::new(),
+                            }),
+                            LocalOrRemotePath::Local(_) => None,
+                        })
+                        .collect(),
+                    max_file_bytes: None,
+                    max_batch_bytes: None,
+                };
+                let response = client.read_file_context(request).await?;
+                let skills = skill_paths
+                    .into_iter()
+                    .zip(response.file_contexts)
+                    .filter_map(|(path, file_context)| {
+                        let file_context_proto::Content::TextContent(content) =
+                            file_context.content?
+                        else {
+                            return None;
+                        };
+                        let provider_path = match &path {
+                            LocalOrRemotePath::Local(path) => path.clone(),
+                            LocalOrRemotePath::Remote(remote) => remote.path.to_local_path_lossy(),
+                        };
+                        let provider =
+                            get_provider_for_path(&provider_path).unwrap_or(SkillProvider::Agents);
+                        parse_skill_content_at_location(
+                            path,
+                            &content,
+                            provider,
+                            SkillScope::Project,
+                        )
+                        .ok()
+                    })
+                    .collect();
+                Ok::<Vec<ParsedSkill>, anyhow::Error>(skills)
+            },
+            |me, skills, _ctx| match skills {
+                Ok(skills) if !skills.is_empty() => {
+                    let _ = me
+                        .watcher_event_tx
+                        .try_send(SkillWatcherEvent::SkillsAdded { skills });
+                }
+                Ok(_) => {}
+                Err(err) => log::warn!("Failed to read remote project skills: {err}"),
             },
         );
     }
@@ -450,7 +549,13 @@ impl SkillWatcher {
         for (repo_path, queued_project_directory_creations) in queued_by_repo_path {
             // Find all skill directories in the repository
             let repo_metadata = RepoMetadataModel::as_ref(ctx);
-            let skill_dirs = find_skill_directories_in_tree(&repo_path, repo_metadata, ctx);
+            let Some(repo_id) = repo_metadata::RepositoryIdentifier::try_local(&repo_path) else {
+                continue;
+            };
+            let skill_dirs = find_skill_directories_in_tree(&repo_id, repo_metadata, ctx)
+                .into_iter()
+                .filter_map(|path| path.to_local_path().map(Path::to_path_buf))
+                .collect::<Vec<_>>();
             if skill_dirs.is_empty() {
                 continue;
             }
@@ -531,18 +636,20 @@ impl SkillWatcher {
     /// via `DirectoryWatcher` so that modifications to the real file are detected.
     fn register_symlink_watches(&mut self, skills: &[ParsedSkill], ctx: &mut ModelContext<Self>) {
         for skill in skills {
-            let original_path = &skill.path;
+            let Some(original_path) = skill.path.to_local_path() else {
+                continue;
+            };
             let Ok(canonical_path) = dunce::canonicalize(original_path) else {
                 continue;
             };
-            if canonical_path == *original_path {
+            if canonical_path == original_path {
                 continue; // Not a symlink
             }
 
             self.symlink_canonical_to_originals
                 .entry(canonical_path.clone())
                 .or_default()
-                .insert(original_path.clone());
+                .insert(original_path.to_path_buf());
 
             let Some(canonical_dir) = canonical_path.parent() else {
                 continue;

@@ -195,7 +195,9 @@ fn convert_start_agent_v2_execution_mode(
 
 fn convert_skill_reference(skill_ref: api::SkillRef) -> Option<SkillReference> {
     match skill_ref.skill_reference {
-        Some(api::skill_ref::SkillReference::Path(path)) => Some(SkillReference::Path(path.into())),
+        Some(api::skill_ref::SkillReference::Path(path)) => Some(SkillReference::Path(
+            warp_util::local_or_remote_path::LocalOrRemotePath::Local(path.into()),
+        )),
         Some(api::skill_ref::SkillReference::BundledSkillId(id)) => {
             Some(SkillReference::BundledSkillId(id))
         }
