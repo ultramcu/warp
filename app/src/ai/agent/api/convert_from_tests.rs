@@ -1,6 +1,8 @@
 use ai::agent::action::AskUserQuestionType;
 use ai::skills::SkillReference;
+use std::path::PathBuf;
 use warp_multi_agent_api as api;
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 
 use super::{
     convert_api_question, ConversionParams, ConvertAPIMessageToClientOutputMessage,
@@ -554,7 +556,7 @@ fn converts_remote_start_agent_v2_with_skill_references() {
         StartAgentExecutionMode::Remote {
             environment_id: "env-123".to_string(),
             skill_references: vec![
-                SkillReference::Path("/tmp/SKILL.md".into()),
+                SkillReference::Path(LocalOrRemotePath::Local(PathBuf::from("/tmp/SKILL.md",))),
                 SkillReference::BundledSkillId("review-comments".to_string()),
             ],
             model_id: "gpt-test".to_string(),

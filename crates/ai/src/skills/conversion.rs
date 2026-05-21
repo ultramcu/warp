@@ -1,7 +1,7 @@
-use std::path::PathBuf;
 
 use thiserror::Error;
 use warp_multi_agent_api as api;
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 
 use crate::agent::action_result::{AnyFileContent, FileContext};
 use crate::skills::{ParsedSkill, SkillProvider, SkillScope};
@@ -27,7 +27,7 @@ impl From<ParsedSkill> for api::Skill {
         api::Skill {
             descriptor: Some(api::SkillDescriptor {
                 skill_reference: Some(api::skill_descriptor::SkillReference::Path(
-                    skill.path.to_string_lossy().to_string(),
+                    skill.path.display_path(),
                 )),
                 name: skill.name,
                 description: skill.description,
@@ -35,7 +35,7 @@ impl From<ParsedSkill> for api::Skill {
                 provider: Some(skill.provider.into()),
             }),
             content: Some(api::FileContent {
-                file_path: skill.path.to_string_lossy().to_string(),
+                file_path: skill.path.display_path(),
                 content: skill.content,
                 line_range: skill
                     .line_range
@@ -119,7 +119,7 @@ impl TryFrom<api::Skill> for ParsedSkill {
         let line_range = context.line_range.as_ref();
 
         Ok(ParsedSkill {
-            path: PathBuf::from(&path),
+            path: LocalOrRemotePath::Local(path.into()),
             name: descriptor.name,
             description: descriptor.description,
             content,

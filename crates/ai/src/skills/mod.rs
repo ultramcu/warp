@@ -5,7 +5,9 @@ mod read_skills;
 mod skill_provider;
 mod skill_reference;
 
-pub use parse_skill::{parse_bundled_skill, parse_skill, ParsedSkill};
+pub use parse_skill::{
+    parse_bundled_skill, parse_skill, parse_skill_content_at_location, ParsedSkill,
+};
 pub use read_skills::read_skills;
 pub use skill_provider::{
     get_provider_for_path, home_skills_path, provider_rank, SkillProvider, SkillProviderDefinition,

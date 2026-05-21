@@ -2043,7 +2043,7 @@ impl AgentDriver {
                     .map(|parsed_skill| ResolvePromptAttachedSkill {
                         name: parsed_skill.name.clone(),
                         content: parsed_skill.content.clone(),
-                        path: Some(parsed_skill.path.to_string_lossy().to_string()),
+                        path: Some(parsed_skill.path.display_path()),
                     });
                 let request = ResolvePromptRequest {
                     skill,

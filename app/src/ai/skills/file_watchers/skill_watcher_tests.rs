@@ -2,14 +2,20 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use ai::skills::{ParsedSkill, SkillProvider, SkillScope};
-use repo_metadata::repositories::DetectedRepositories;
-use repo_metadata::{DirectoryWatcher, RepoMetadataModel, RepositoryUpdate, TargetFile};
+use remote_server::proto::{file_context_proto, FileContextProto};
+use repo_metadata::{
+    repositories::DetectedRepositories, DirectoryWatcher, RepoMetadataModel, RepositoryUpdate,
+    TargetFile,
+};
 use tempfile::TempDir;
-use warp_util::standardized_path::StandardizedPath;
+use warp_util::{
+    host_id::HostId, local_or_remote_path::LocalOrRemotePath, remote_path::RemotePath,
+    standardized_path::StandardizedPath,
+};
 use warpui::App;
 
-use super::SkillWatcher;
 use crate::ai::skills::skill_manager::SkillWatcherEvent;
+use super::{parse_remote_skill_file_contexts, SkillWatcher};
 
 /// Helper function for creating a single skill file
 fn create_skill_file(dir: &TempDir, name: &str, description: &str, content: &str) -> ParsedSkill {
@@ -31,7 +37,7 @@ description: {}
     let line_range_start = skill_content.clone().lines().count() - content.lines().count() + 1;
     let line_range_end = skill_content.clone().lines().count() + 1;
     ParsedSkill {
-        path: skill_file_path,
+        path: LocalOrRemotePath::Local(skill_file_path),
         name: name.to_string(),
         description: description.to_string(),
         content: skill_content.clone(),
@@ -39,6 +45,85 @@ description: {}
         provider: SkillProvider::Agents,
         scope: SkillScope::Project,
     }
+}
+
+fn remote_skill_path(host_id: &HostId, name: &str) -> LocalOrRemotePath {
+    LocalOrRemotePath::Remote(RemotePath::new(
+        host_id.clone(),
+        StandardizedPath::try_new(format!("/repo/.agents/skills/{name}/SKILL.md").as_str())
+            .unwrap(),
+    ))
+}
+
+fn remote_skill_content(name: &str, description: &str, body: &str) -> String {
+    format!(
+        r#"---
+name: {name}
+description: {description}
+---
+{body}
+"#
+    )
+}
+
+fn remote_skill_file_context(path: &LocalOrRemotePath, content: &str) -> FileContextProto {
+    let LocalOrRemotePath::Remote(remote) = path else {
+        panic!("Expected a remote skill path");
+    };
+
+    FileContextProto {
+        file_name: remote.path.as_str().to_string(),
+        content: Some(file_context_proto::Content::TextContent(
+            content.to_string(),
+        )),
+        line_range_start: None,
+        line_range_end: None,
+        last_modified_epoch_millis: None,
+        line_count: content.lines().count() as u32,
+    }
+}
+
+#[test]
+fn parse_remote_skill_file_contexts_matches_reordered_responses_by_path() {
+    let host = HostId::new("test-host".to_string());
+    let first_path = remote_skill_path(&host, "first");
+    let second_path = remote_skill_path(&host, "second");
+    let first_content = remote_skill_content("first", "First skill", "First body");
+    let second_content = remote_skill_content("second", "Second skill", "Second body");
+
+    let skills = parse_remote_skill_file_contexts(
+        vec![first_path.clone(), second_path.clone()],
+        vec![
+            remote_skill_file_context(&second_path, &second_content),
+            remote_skill_file_context(&first_path, &first_content),
+        ],
+    );
+
+    assert_eq!(skills.len(), 2);
+    assert_eq!(skills[0].path, first_path);
+    assert_eq!(skills[0].name, "first");
+    assert_eq!(skills[0].content, first_content);
+    assert_eq!(skills[1].path, second_path);
+    assert_eq!(skills[1].name, "second");
+    assert_eq!(skills[1].content, second_content);
+}
+
+#[test]
+fn parse_remote_skill_file_contexts_keeps_paths_aligned_after_missing_reads() {
+    let host = HostId::new("test-host".to_string());
+    let missing_path = remote_skill_path(&host, "missing");
+    let present_path = remote_skill_path(&host, "present");
+    let present_content = remote_skill_content("present", "Present skill", "Present body");
+
+    let skills = parse_remote_skill_file_contexts(
+        vec![missing_path, present_path.clone()],
+        vec![remote_skill_file_context(&present_path, &present_content)],
+    );
+
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].path, present_path);
+    assert_eq!(skills[0].name, "present");
+    assert_eq!(skills[0].content, present_content);
 }
 
 // ============================================================================
@@ -59,7 +144,10 @@ fn test_handle_repository_update_single_skill_added() {
         let skill = create_skill_file(&temp_dir, "test", "Test skill", "Test content");
 
         let update = RepositoryUpdate {
-            added: HashSet::from([TargetFile::new(skill.path.clone(), false)]),
+            added: HashSet::from([TargetFile::new(
+                skill.path.to_local_path().unwrap().to_path_buf(),
+                false,
+            )]),
             modified: HashSet::new(),
             deleted: HashSet::new(),
             moved: HashMap::new(),
@@ -97,7 +185,10 @@ fn test_handle_repository_update_skill_modified() {
 
         let update = RepositoryUpdate {
             added: HashSet::new(),
-            modified: HashSet::from([TargetFile::new(skill.path.clone(), false)]),
+            modified: HashSet::from([TargetFile::new(
+                skill.path.to_local_path().unwrap().to_path_buf(),
+                false,
+            )]),
             deleted: HashSet::new(),
             moved: HashMap::new(),
             commit_updated: false,
@@ -135,7 +226,10 @@ fn test_handle_repository_update_skill_deleted() {
         let update = RepositoryUpdate {
             added: HashSet::new(),
             modified: HashSet::new(),
-            deleted: HashSet::from([TargetFile::new(skill.path.clone(), false)]),
+            deleted: HashSet::from([TargetFile::new(
+                skill.path.to_local_path().unwrap().to_path_buf(),
+                false,
+            )]),
             moved: HashMap::new(),
             commit_updated: false,
             index_lock_detected: false,
@@ -174,8 +268,8 @@ fn test_handle_repository_update_multiple_skills_deleted() {
             added: HashSet::new(),
             modified: HashSet::new(),
             deleted: HashSet::from([
-                TargetFile::new(skill_a.path.clone(), false),
-                TargetFile::new(skill_b.path.clone(), false),
+                TargetFile::new(skill_a.path.to_local_path().unwrap().to_path_buf(), false),
+                TargetFile::new(skill_b.path.to_local_path().unwrap().to_path_buf(), false),
             ]),
             moved: HashMap::new(),
             commit_updated: false,
@@ -191,9 +285,9 @@ fn test_handle_repository_update_multiple_skills_deleted() {
         let SkillWatcherEvent::SkillsDeleted { mut paths } = event else {
             panic!("Expected SkillsDeleted event");
         };
-        paths.sort();
+        paths.sort_by_key(LocalOrRemotePath::display_path);
         let mut expected = vec![skill_a.path, skill_b.path];
-        expected.sort();
+        expected.sort_by_key(LocalOrRemotePath::display_path);
         assert_eq!(paths, expected);
     });
 }
@@ -218,8 +312,8 @@ fn test_handle_repository_update_skill_moved() {
             modified: HashSet::new(),
             deleted: HashSet::new(),
             moved: HashMap::from([(
-                TargetFile::new(new_skill.path.clone(), false),
-                TargetFile::new(old_skill.path.clone(), false),
+                TargetFile::new(new_skill.path.to_local_path().unwrap().to_path_buf(), false),
+                TargetFile::new(old_skill.path.to_local_path().unwrap().to_path_buf(), false),
             )]),
             commit_updated: false,
             index_lock_detected: false,
