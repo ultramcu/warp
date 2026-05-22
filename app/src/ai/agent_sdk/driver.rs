@@ -1505,11 +1505,7 @@ impl AgentDriver {
 
         let load_skills_result = foreground
             .spawn(move |_, ctx| {
-                let repo_paths = repo_paths
-                    .into_iter()
-                    .map(LocalOrRemotePath::Local)
-                    .collect::<Vec<_>>();
-                let skills = SkillWatcher::read_skills_for_repos(&repo_paths, ctx);
+                let skills = SkillWatcher::read_local_skills_for_repos(&repo_paths, ctx);
                 if !skills.is_empty() {
                     log::info!("Loaded {} environment skill(s)", skills.len());
                 } else {

@@ -580,7 +580,6 @@ fn converts_remote_start_agent_v2_with_skill_references() {
     assert_eq!(lifecycle_subscription, None);
 }
 
-
 #[test]
 fn converts_local_start_agent_v2_with_harness_type() {
     let task_id = TaskId::new("task-id".to_string());

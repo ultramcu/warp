@@ -4,8 +4,8 @@ use std::fs;
 use ai::skills::{ParsedSkill, SkillProvider, SkillScope};
 use remote_server::proto::{file_context_proto, FileContextProto};
 use repo_metadata::{
-    repositories::DetectedRepositories, DirectoryWatcher, RepoMetadataModel, RepositoryUpdate,
-    TargetFile,
+    repositories::DetectedRepositories, DirectoryWatcher, RepoMetadataModel, RepositoryIdentifier,
+    RepositoryUpdate, TargetFile,
 };
 use tempfile::TempDir;
 use warp_util::{
@@ -14,7 +14,10 @@ use warp_util::{
 };
 use warpui::App;
 
-use super::{parse_remote_skill_file_contexts, SkillWatcher};
+use super::{
+    parse_remote_skill_file_contexts, remote_skill_read_request, SkillWatcher,
+    REMOTE_SKILL_MAX_BATCH_BYTES, REMOTE_SKILL_MAX_FILE_BYTES,
+};
 use crate::ai::skills::skill_manager::SkillWatcherEvent;
 
 /// Helper function for creating a single skill file
@@ -124,6 +127,112 @@ fn parse_remote_skill_file_contexts_keeps_paths_aligned_after_missing_reads() {
     assert_eq!(skills[0].path, present_path);
     assert_eq!(skills[0].name, "present");
     assert_eq!(skills[0].content, present_content);
+}
+
+#[test]
+fn remote_skill_read_request_sets_bounded_read_budget() {
+    let host = HostId::new("test-host".to_string());
+    let first_path = remote_skill_path(&host, "first");
+    let second_path = remote_skill_path(&host, "second");
+
+    let request = remote_skill_read_request(&[first_path.clone(), second_path.clone()]);
+
+    assert_eq!(request.max_file_bytes, Some(REMOTE_SKILL_MAX_FILE_BYTES));
+    assert_eq!(request.max_batch_bytes, Some(REMOTE_SKILL_MAX_BATCH_BYTES));
+    assert_eq!(request.files.len(), 2);
+    let LocalOrRemotePath::Remote(first_remote) = first_path else {
+        panic!("Expected remote path");
+    };
+    let LocalOrRemotePath::Remote(second_remote) = second_path else {
+        panic!("Expected remote path");
+    };
+    assert_eq!(request.files[0].path, first_remote.path.as_str());
+    assert_eq!(request.files[1].path, second_remote.path.as_str());
+}
+
+#[test]
+fn update_remote_skill_path_cache_emits_deleted_stale_paths() {
+    let (tx, rx) = async_channel::unbounded();
+
+    App::test((), |mut app| async move {
+        app.add_singleton_model(RepoMetadataModel::new);
+        let skill_watcher_handle = app.add_model(|ctx| SkillWatcher::new_for_testing(ctx, tx));
+
+        let host = HostId::new("test-host".to_string());
+        let repo_id = RepositoryIdentifier::Remote(RemotePath::new(
+            host.clone(),
+            StandardizedPath::try_new("/repo").unwrap(),
+        ));
+        let first_path = remote_skill_path(&host, "first");
+        let second_path = remote_skill_path(&host, "second");
+
+        skill_watcher_handle.update(&mut app, |watcher, _| {
+            watcher.update_remote_skill_path_cache(
+                &repo_id,
+                &[first_path.clone(), second_path.clone()],
+            );
+        });
+        assert!(rx.try_recv().is_err());
+
+        skill_watcher_handle.update(&mut app, |watcher, _| {
+            watcher.update_remote_skill_path_cache(&repo_id, std::slice::from_ref(&second_path));
+        });
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            SkillWatcherEvent::SkillsDeleted {
+                paths: vec![first_path]
+            }
+        );
+
+        skill_watcher_handle.read(&app, |watcher, _| {
+            assert_eq!(
+                watcher.remote_skill_paths_by_repo.get(&repo_id),
+                Some(&HashSet::from([second_path]))
+            );
+        });
+    });
+}
+
+#[test]
+fn handle_repository_removed_deletes_cached_remote_skill_paths_and_repo_root() {
+    let (tx, rx) = async_channel::unbounded();
+
+    App::test((), |mut app| async move {
+        app.add_singleton_model(RepoMetadataModel::new);
+        let skill_watcher_handle = app.add_model(|ctx| SkillWatcher::new_for_testing(ctx, tx));
+
+        let host = HostId::new("test-host".to_string());
+        let repo_root = RemotePath::new(host.clone(), StandardizedPath::try_new("/repo").unwrap());
+        let repo_id = RepositoryIdentifier::Remote(repo_root.clone());
+        let first_path = remote_skill_path(&host, "first");
+        let second_path = remote_skill_path(&host, "second");
+
+        skill_watcher_handle.update(&mut app, |watcher, _| {
+            watcher.update_remote_skill_path_cache(
+                &repo_id,
+                &[first_path.clone(), second_path.clone()],
+            );
+            watcher.handle_repository_removed(&repo_id);
+        });
+
+        let SkillWatcherEvent::SkillsDeleted { mut paths } = rx.recv().await.unwrap() else {
+            panic!("Expected SkillsDeleted event");
+        };
+        paths.sort_by_key(LocalOrRemotePath::display_path);
+
+        let mut expected = vec![
+            first_path,
+            second_path,
+            LocalOrRemotePath::Remote(repo_root),
+        ];
+        expected.sort_by_key(LocalOrRemotePath::display_path);
+        assert_eq!(paths, expected);
+
+        skill_watcher_handle.read(&app, |watcher, _| {
+            assert!(!watcher.remote_skill_paths_by_repo.contains_key(&repo_id));
+        });
+    });
 }
 
 // ============================================================================
