@@ -1504,6 +1504,90 @@ fn test_emoji_variation_selector() {
     assert_eq!(grid[0][4].c, 'c');
 }
 
+/// Thai SARA AM (U+0E33, a *spacing* vowel with unicode-width 1) must attach to
+/// its preceding consonant at input time so the grapheme "น้ำ" occupies ONE grid
+/// cell — not spill the SARA AM into its own cell (which detaches the nikhahit
+/// dot). This is the input-time grapheme-clustering behavior.
+#[test]
+fn test_thai_sara_am_attaches_to_consonant() {
+    let size = SizeInfo::new_without_font_metrics(2, 10);
+    let mut blockgrid = BlockGrid::new(
+        size,
+        MAX_SCROLL_LIMIT,
+        ChannelEventListener::new_for_test(),
+        ObfuscateSecrets::No,
+        PerformResetGridChecks::default(),
+    );
+    blockgrid.start();
+
+    // "น้ำ" = น (U+0E19, base) + ้ (U+0E49, width-0 tone) + ำ (U+0E33, width-1 SARA AM)
+    blockgrid.input('\u{0E19}');
+    blockgrid.input('\u{0E49}');
+    blockgrid.input('\u{0E33}');
+    // A following char must land at column 1 — proving SARA AM did not take a cell.
+    blockgrid.input('x');
+
+    let grid = blockgrid.grid_storage();
+    assert_eq!(grid[0][0].c, '\u{0E19}', "base consonant stays in cell 0");
+    let CharOrStr::Str(s) = grid[0][0].content_for_display() else {
+        panic!("expected the consonant cell to hold the whole cluster as a Str");
+    };
+    assert_eq!(s, "น้ำ", "tone + SARA AM both attach to the consonant cell");
+    assert_eq!(grid[0][1].c, 'x', "SARA AM did not consume its own cell");
+}
+
+/// A SARA AM with no attachable base before it (line start) stays in its own cell
+/// (there is nothing to merge into). It must not be dropped or merged into an
+/// empty cell.
+#[test]
+fn test_thai_sara_am_standalone_at_line_start() {
+    let size = SizeInfo::new_without_font_metrics(2, 10);
+    let mut blockgrid = BlockGrid::new(
+        size,
+        MAX_SCROLL_LIMIT,
+        ChannelEventListener::new_for_test(),
+        ObfuscateSecrets::No,
+        PerformResetGridChecks::default(),
+    );
+    blockgrid.start();
+
+    blockgrid.input('\u{0E33}'); // lone SARA AM at column 0
+
+    let grid = blockgrid.grid_storage();
+    assert_eq!(grid[0][0].c, '\u{0E33}', "lone SARA AM keeps its own cell");
+    assert!(
+        matches!(grid[0][0].content_for_display(), CharOrStr::Char(_)),
+        "lone SARA AM is a bare char, not a merged cluster"
+    );
+}
+
+/// Two base consonants are separate grapheme clusters, so they must NOT merge —
+/// the input-time attach only fires for a genuine grapheme continuation, never
+/// for a following starter. (Guards against over-merging.)
+#[test]
+fn test_thai_consonants_stay_in_separate_cells() {
+    let size = SizeInfo::new_without_font_metrics(2, 10);
+    let mut blockgrid = BlockGrid::new(
+        size,
+        MAX_SCROLL_LIMIT,
+        ChannelEventListener::new_for_test(),
+        ObfuscateSecrets::No,
+        PerformResetGridChecks::default(),
+    );
+    blockgrid.start();
+
+    // ก (U+0E01) then ข (U+0E02) — two independent consonants.
+    blockgrid.input('\u{0E01}');
+    blockgrid.input('\u{0E02}');
+
+    let grid = blockgrid.grid_storage();
+    assert_eq!(grid[0][0].c, '\u{0E01}', "first consonant in cell 0");
+    assert_eq!(
+        grid[0][1].c, '\u{0E02}',
+        "second consonant in its own cell 1"
+    );
+}
+
 #[test]
 pub fn test_grid_agnostic_point() {
     let mut grid = mock_blockgrid(

@@ -17,6 +17,7 @@ use bounded_vec_deque::BoundedVecDeque;
 use pathfinder_geometry::vector::Vector2F;
 use rand::Rng;
 use tab_stops::TabStops;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use warp_core::channel::ChannelState;
 use warp_core::features::FeatureFlag;
@@ -48,6 +49,21 @@ use crate::terminal::model::selection::ScrollDelta;
 use crate::terminal::{ClipboardType, SizeInfo};
 
 const MAX_IMAGE_CELL_HEIGHT: u32 = 255;
+
+/// Returns true if appending `c` to the previous cell's content keeps it a
+/// single grapheme cluster — i.e. `c` continues that grapheme rather than
+/// starting a new one. Used at input time so that a base character plus its
+/// combining marks (including *spacing* marks such as Thai/Lao SARA AM, which
+/// have unicode-width 1) are stored in one grid cell.
+fn grapheme_continues(prev: CharOrStr, c: char) -> bool {
+    let mut s = String::new();
+    match prev {
+        CharOrStr::Char(p) => s.push(p),
+        CharOrStr::Str(p) => s.push_str(p),
+    }
+    s.push(c);
+    s.graphemes(true).count() == 1
+}
 
 /// State needed for the grid-level implementation of [`ansi::Handler`].
 #[derive(Clone)]
@@ -200,6 +216,41 @@ impl ansi::Handler for GridHandler {
         };
 
         let num_cols = self.columns();
+
+        // Handle a spacing combining mark that continues the grapheme cluster of
+        // the preceding cell (e.g. Thai SARA AM `ำ` U+0E33 / Lao `ຳ` U+0EB3 —
+        // spacing vowels with unicode-width 1). Such a mark attaches to the base
+        // cell so that a grapheme cluster occupies a single grid cell, mirroring
+        // the zero-width attachment below. This moves grapheme clustering to
+        // input time (the terminal model owns it) instead of the renderer. Gated
+        // to non-ASCII width-1 chars so the common path is untouched; wider
+        // clusters (e.g. regional-indicator flags, width 2) are handled elsewhere.
+        if width == 1 && !c.is_ascii() {
+            // Look-behind to the base cell, mirroring the zero-width column math.
+            let mut col = self.grid.cursor().point.col;
+            if !self.grid.cursor().input_needs_wrap {
+                col = col.saturating_sub(1);
+            }
+            let row = self.grid.cursor_point().row;
+            if self.grid[row][col].flags.contains(Flags::WIDE_CHAR_SPACER) {
+                col = col.saturating_sub(1);
+            }
+            // Only attach to a real written base whose cluster `c` extends. This
+            // excludes line start / empty cells (base is DEFAULT_CHAR) and
+            // non-continuations (e.g. a Latin letter or space followed by SARA AM).
+            let attaches = {
+                let base = &self.grid[row][col];
+                base.c != cell::DEFAULT_CHAR && grapheme_continues(base.raw_content(), c)
+            };
+            if attaches {
+                // Attach without advancing the cursor (the cluster is one cell)
+                // and without the width-2 promotion in the zero-width branch: a
+                // Thai cluster's summed unicode-width is 2, but as one grapheme it
+                // must stay a single cell.
+                self.grid[row][col].push_zerowidth(c, /* log_long_grapheme_warnings */ true);
+                return;
+            }
+        }
 
         // Handle zero-width characters.
         if width == 0 {
